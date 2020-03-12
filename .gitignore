@@ -1,0 +1,6 @@
+*.txt
+.ipynb_checkpoints/
+venv/
+.idea
+.DS_STORE
+output.json
