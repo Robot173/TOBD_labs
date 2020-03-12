@@ -48,7 +48,6 @@ def show_process_id(func):
 
 def is_alive(processes):
     def wrapped():
-        # print(list(map(lambda x: x.finished.value, processes)))
         return not all(map(lambda x: x.finished.value, processes))
 
     return wrapped
