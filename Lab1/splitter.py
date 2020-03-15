@@ -1,10 +1,11 @@
+import datetime
 import functools
 import multiprocessing
 import os
 import queue as mul_q
 import time
 from collections import defaultdict
-import json
+from itertools import zip_longest
 
 CHUNK_SIZE = 1000 * 1024
 FILE = "inputv10.txt"
@@ -23,16 +24,19 @@ class Process(multiprocessing.Process):
         return res
 
 
-def timeit(func):
-    @functools.wraps(func)
-    def _wrapped(*args, **kwargs):
-        start = time.clock()
-        result = func(*args, **kwargs)
-        end = time.clock()
-        print(func.__name__, end - start)
-        return result
+def timeit(timer=time.clock):
+    def _inner(func):
+        @functools.wraps(func)
+        def _wrapped(*args, **kwargs):
+            start = timer()
+            result = func(*args, **kwargs)
+            end = timer()
+            print(func.__name__, end - start)
+            return result
 
-    return _wrapped
+        return _wrapped
+
+    return _inner
 
 
 def show_process_id(func):
@@ -64,8 +68,8 @@ def stop_processes(processes):
 
 
 @show_process_id
-@timeit
-def splitter(input_queue: multiprocessing.Queue, output_queue: multiprocessing.Queue, should_continue, timeout=0.05):
+@timeit()
+def splitter(input_queue: multiprocessing.Queue, output_queue: multiprocessing.Queue, should_continue, timeout=0.001):
     with open(FILE, 'r') as f:
         while should_continue.value or not input_queue.empty():
             try:
@@ -81,8 +85,8 @@ def splitter(input_queue: multiprocessing.Queue, output_queue: multiprocessing.Q
 
 
 @show_process_id
-@timeit
-def mapper(input_queue: multiprocessing.Queue, output_queue: multiprocessing.Queue, should_continue, timeout=0.05):
+@timeit()
+def mapper(input_queue: multiprocessing.Queue, output_queue: multiprocessing.Queue, should_continue, timeout=0.001):
     while should_continue() or not input_queue.empty():
         try:
             chunk = input_queue.get(timeout=timeout)
@@ -92,30 +96,62 @@ def mapper(input_queue: multiprocessing.Queue, output_queue: multiprocessing.Que
         result_dict = defaultdict(int)
         for c in chunk:
             result_dict[c] += 1
-        output_queue.put(result_dict)
+        output_queue.put(dict(result_dict))
+
+
+def grouper(iterable, n, fillvalue=None):
+    """Collect data into fixed-length chunks or blocks"""
+    # grouper('ABCDEFG', 3, 'x') --> ABC DEF Gxx
+    args = [iter(iterable)] * n
+    return zip_longest(fillvalue=fillvalue, *args)
+
+
+def merge_dicts(dict1, dict2, group_size=128):
+    if len(dict1) == 0:
+        dict1.update(dict2)
+        return dict1
+
+    for chunk in grouper(dict2.items(), group_size):
+        chunk = filter(None, chunk)
+
+        not_used = {k: v for k, v in chunk if k not in dict1}
+        dict1.update(not_used)
+
+        used = {k: v + dict1[k] for k, v in chunk if k in dict1}
+        dict1.update(used)
+
+    return dict1
 
 
 @show_process_id
-@timeit
-def reducer(input_queue, output_queue, should_continue, timeout=0.05):
+@timeit()
+def reducer(input_queue: multiprocessing.Queue, output_queue: multiprocessing.Queue, should_continue, merge_count=128, timeout=0.01):
     result = dict()
+    counter = 0
 
     while should_continue() or not input_queue.empty():
         try:
             input_dict = input_queue.get(timeout=timeout)
         except mul_q.Empty:
+            if counter > merge_count / 10:
+                output_queue.put(result)
+                result = dict()
+                counter = 0
+            else:
+                time.sleep(timeout)
             continue
 
-        for k in input_dict:
-            if k in result:
-                result[k] += input_dict[k]
-            else:
-                result[k] = input_dict[k]
+        merge_dicts(result, input_dict)
+        counter = counter + 1
+        if counter > merge_count:
+            output_queue.put(result)
+            result = dict()
+            counter = 0
 
     output_queue.put(result)
 
 
-@timeit
+@timeit()
 def final_reducer(input_queue, should_continue, timeout=0.05):
     result = dict()
 
@@ -125,16 +161,12 @@ def final_reducer(input_queue, should_continue, timeout=0.05):
         except mul_q.Empty:
             continue
 
-        for k in input_dict:
-            if k in result:
-                result[k] += input_dict[k]
-            else:
-                result[k] = input_dict[k]
+        merge_dicts(result, input_dict)
 
     return result
 
 
-@timeit
+@timeit(timer=datetime.datetime.now)
 def start():
     should_continue = multiprocessing.Value('d', 1)
 
@@ -157,10 +189,10 @@ def start():
     ]
 
     start_processes(mappers)
-    queue_reducers_output = multiprocessing.Queue(maxsize=100)
+
+    queue_reducers_output = multiprocessing.Queue(maxsize=1024)
 
     reducers = [
-        Process(target=reducer, args=(queue_map_output, queue_reducers_output, is_alive(mappers),)),
         Process(target=reducer, args=(queue_map_output, queue_reducers_output, is_alive(mappers),)),
         Process(target=reducer, args=(queue_map_output, queue_reducers_output, is_alive(mappers),)),
         Process(target=reducer, args=(queue_map_output, queue_reducers_output, is_alive(mappers),)),
@@ -187,13 +219,12 @@ def start():
     result = final_reducer(queue_reducers_output, is_alive(reducers))
 
     queue_splitter_input.close()
-    stop_processes(splitters)
-
     queue_splitter_output.close()
-    stop_processes(mappers)
-
     queue_map_output.close()
     queue_reducers_output.close()
+
+    stop_processes(splitters)
+    stop_processes(mappers)
     stop_processes(reducers)
 
     return result
@@ -201,5 +232,8 @@ def start():
 
 if __name__ == '__main__':
     result = start()
+    print(len(result))
+
+    # import json
     # with open(FILE_OUTPUT, 'w') as out:
     #     json.dump(result, out)
