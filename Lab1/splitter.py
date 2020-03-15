@@ -114,11 +114,7 @@ def merge_dicts(dict1, dict2, group_size=128):
     for chunk in grouper(dict2.items(), group_size):
         chunk = filter(None, chunk)
 
-        not_used = {k: v for k, v in chunk if k not in dict1}
-        dict1.update(not_used)
-
-        used = {k: v + dict1[k] for k, v in chunk if k in dict1}
-        dict1.update(used)
+        dict1.update({k: v + dict1.get(k, 0) for k, v in chunk})
 
     return dict1
 
@@ -219,13 +215,15 @@ def start():
     result = final_reducer(queue_reducers_output, is_alive(reducers))
 
     queue_splitter_input.close()
-    queue_splitter_output.close()
-    queue_map_output.close()
-    queue_reducers_output.close()
-
     stop_processes(splitters)
+
+    queue_splitter_output.close()
     stop_processes(mappers)
+
+    queue_map_output.close()
     stop_processes(reducers)
+
+    queue_reducers_output.close()
 
     return result
 
